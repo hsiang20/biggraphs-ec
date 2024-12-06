@@ -36,7 +36,7 @@ void top_down_step(
 
     int new_distance = distances[frontier->vertices[0]] + 1;
 
-    #pragma omp parallel for schedule(dynamic, 50)
+    #pragma omp parallel for schedule(dynamic, 100)
     for (int i=0; i<frontier->count; i++) {
         
         int node = frontier->vertices[i];
@@ -117,20 +117,23 @@ int bottom_up_step(Graph g, bool* visit_mem, bool* new_visit_mem, int* distances
     std::atomic<int> new_frontier_size_atomic{0};
     // int new_frontier_size = 0;
 
-    #pragma omp parallel for // reduction(+ : new_frontier_size)
+    #pragma omp parallel for schedule(dynamic, 800) 
     for (int i=0; i<g->num_nodes; i++) {
         
         if (distances[i] != NOT_VISITED_MARKER) continue;
-    
-        const int* node_begin = incoming_begin(g, i);
-        const int* node_end = incoming_end(g, i);
-    
-        for (const int* neighbor_ptr=node_begin; neighbor_ptr<node_end; neighbor_ptr++) {
+
+        int node_begin = g->incoming_starts[i];
+        int node_end_ind = (i == g->num_nodes - 1)
+                           ? g->num_edges
+                           : g->incoming_starts[i + 1];
+        int node_end = node_end_ind;
             
-            if (visit_mem[*neighbor_ptr]) {
+        for (int neighbor=node_begin; neighbor<node_end; neighbor++) {
+            int neighbor_ind = g->incoming_edges[neighbor];
+            if (visit_mem[neighbor_ind]) {
                 // printf("FIND!\n");
                 new_visit_mem[i] = true;
-                distances[i] = distances[*neighbor_ptr] + 1;
+                distances[i] = distances[neighbor_ind] + 1;
                 new_frontier_size_atomic.fetch_add(1);
                 // new_frontier_size += 1;
                 break;
@@ -214,7 +217,8 @@ void bfs_hybrid(Graph graph, solution* sol) {
     bool using_top_down = true;
 
     int frontier_size = frontier->count;
-    int compare_base = graph->num_nodes / (graph->num_edges / graph->num_nodes) ;
+    int average_edge = graph->num_edges / graph->num_nodes;
+    int remaining_node = graph->num_nodes - 1;
 
     while (frontier_size != 0) {
         
@@ -224,10 +228,11 @@ void bfs_hybrid(Graph graph, solution* sol) {
             frontier = new_frontier;
             new_frontier = tmp;
             frontier_size = frontier->count;
+            remaining_node -= frontier->count;
             vertex_set_clear(new_frontier);
 
-            if (frontier_size > compare_base) {
-                printf("SWITCH at frontier_size = %d, compare_base = %d \n", frontier_size, compare_base);
+            if (frontier_size > remaining_node * 0.3) {
+                // printf("SWITCH at frontier_size = %d, remaining_node = %d \n", frontier_size, remaining_node);
                 using_top_down = false;
                 for (int i = 0; i < frontier_size; i++) {
                     visit_mem[frontier->vertices[i]] = true;
@@ -241,6 +246,20 @@ void bfs_hybrid(Graph graph, solution* sol) {
             visit_mem = new_visit_mem;
             new_visit_mem = tmp;
             memset(new_visit_mem, false, sizeof(bool) * graph->num_nodes);
+            if (frontier_size < remaining_node * 0.3) {
+                // printf("SWITCH at frontier_size = %d, remaining_node = %d \n", frontier_size, remaining_node);
+                using_top_down = true;
+                vertex_set_clear(frontier);
+
+                std::atomic<int> count_tmp{0};
+                #pragma omp parallel for schedule(dynamic, 1000)
+                for (int i = 0; i < graph->num_nodes; i++) {
+                    if (visit_mem[i]) {
+                        frontier->vertices[count_tmp.fetch_add(1)] = i;
+                    }
+                }
+                frontier->count = count_tmp;
+            }
         }
 
 
